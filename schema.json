@@ -1,0 +1,25 @@
+{
+    "Heading": "Care Plans",
+    "description": "Welcome to our Mental Health Portal. The exercises you see below are tailored to you by your provider. Please select one to start with.",
+    "tiles": [
+        {
+            "name": "Mindfulness",
+            "img_url": "https link",
+            "pages": [
+                
+            {
+                "Header": "Mindfulness",
+                "img_url": "https",
+                "sub_heading": "intro",
+                "description": "des",
+                "Button_label": "Start exercises"
+            },
+            {
+                "description": "des",
+                "widgit": "stopwatch"
+            }
+        ]
+        },
+        {}
+    ]
+}
