@@ -84,7 +84,7 @@ def attention(q, k, v, d_k, mask=None, dropout=None):
     
     if mask is not None:
         mask = mask.unsqueeze(1)
-        scores = scores.masked_fill(mask == 0, -1e9)
+        scores = scores.masked_fill(mask==0, float('-inf'))
     
     scores = F.softmax(scores, dim=-1)
     
@@ -257,9 +257,9 @@ class DecoderLayer(nn.Module):
     def forward(self, x, e_outputs, src_mask, trg_mask):
         x2 = self.norm_1(x)
         x = x + self.dropout_1(self.attn_1(x2, x2, x2, trg_mask))
-        x2 = self.norm_2(x)
-        x = x + self.dropout_2(self.attn_2(x2, e_outputs, e_outputs, \
-        src_mask))
+        # x2 = self.norm_2(x)
+        # x = x + self.dropout_2(self.attn_2(x2, e_outputs, e_outputs, \
+        # src_mask))
         x2 = self.norm_3(x)
         x = x + self.dropout_3(self.ff(x2))
         return x    
@@ -297,13 +297,13 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, src_vocab, trg_vocab, d_model, N, heads, dropout):
         super().__init__()
-        self.encoder = Encoder(src_vocab, d_model, N, heads, dropout)
+        # self.encoder = Encoder(src_vocab, d_model, N, heads, dropout)
         self.decoder = Decoder(trg_vocab, d_model, N, heads, dropout)
         self.out = nn.Linear(d_model, trg_vocab)
     def forward(self, src, trg, src_mask, trg_mask):
-        e_outputs = self.encoder(src, src_mask)
+        # e_outputs = self.encoder(src, src_mask)
         #print("DECODER")
-        d_output = self.decoder(trg, e_outputs, src_mask, trg_mask)
+        d_output = self.decoder(trg, src, src_mask, trg_mask)
         output = self.out(d_output)
         return output
 
@@ -324,12 +324,80 @@ def get_model(opt, src_vocab, trg_vocab):
                 nn.init.xavier_uniform_(p) 
     
     return model
+def create_batches(data, batch_size, seq_len, pad_token=0):
+    # Step 1: Cut the data into chunks of `seq_len`
+    num_batches = len(data) // (batch_size * seq_len)
+    # Trim the data to fit exactly into batches
+    data = data[:num_batches * batch_size * seq_len]    
+    # Step 2: Reshape data to batch_size rows
+    data = torch.tensor(data).view(batch_size, -1)
+    # Step 3: Create batches
+    batches = []
+    for i in range(0, data.size(1), seq_len):
+        if i + seq_len <= data.size(1):
+            batch = data[:, i:i+seq_len]
+            batch_target = data[:, i+1:i+seq_len+1]
+            batches.append((batch, batch_target))
+    
+    return batches
+def create_mask(seq, pad_token):
+    # Create a mask to hide padding
+    pad_mask = (seq != pad_token).unsqueeze(-2)
+
+    # Create a mask to hide future tokens (upper triangular)
+    nopeak_mask = torch.triu(torch.ones((1, seq.size(-1), seq.size(-1)), device=seq.device), diagonal=1).bool()
+    
+    return pad_mask & ~nopeak_mask  # Combine the pad and no peak masks
     
 def train_model(model, opt):
     
     print("training model...")
     model.train()
+    train_data = create_batches(opt.train, opt.batchsize, opt.seqlen, opt.src_pad)
+    valid_data = create_batches(opt.valid, opt.batchsize, opt.seqlen, opt.src_pad)
+    print("Created Batches")
+
+    for epoch in range(opt.epochs):
+        total_loss = 0
+        total_tokens = 0 
+
+        print(f"Epoch {epoch+1}")
+        for i, (input_seq, target_seq) in enumerate(train_data):
+            input_seq = input_seq.to(opt.device)  # B, T, T 
+            target_seq = target_seq.to(opt.device)#  B, T, T but one index shifted to the right
+            
+            # Create masks
+            src_mask = create_mask(input_seq, opt.src_pad) # B, T, T
+            trg_mask = create_mask(target_seq, opt.trg_pad) # B, T, T 
+            
+            # Reset gradients
+            opt.optimizer.zero_grad()
+            
+            # Forward pass
+            output = model(input_seq, target_seq, src_mask, trg_mask) # B, T, vocab_size
+            
+            # Calculate loss
+            loss = F.cross_entropy(output.view(-1, opt.vocab_size), target_seq.view(-1), ignore_index=opt.trg_pad) # output.view -> B*T-1, vocab_size, target_seq.view(-1) -> B*T-1
+            total_loss += loss.item() * target_seq.numel()  # Multiply the loss by the number of non-pad tokens
+            total_tokens += target_seq.numel()
+            
+            # Backward pass and update
+            loss.backward()
+            opt.optimizer.step()
+            
+            if (i + 1) % opt.printevery == 0:
+                print(f'Batch {i+1}, Loss: {loss.item()}')
+        
+        # Calculate average loss per epoch
+        avg_loss = total_loss / total_tokens
+        print(f'Epoch {epoch+1}, Average Loss: {avg_loss}, Perplexity: {calculate_perplexity(avg_loss)}')
+        
+        # Test the model
+        test_model(model, opt, valid_data)
+        model.train()
     
+    torch.save(model.state_dict(), opt.savename)
+
     # write code to:
     #  1. create a nopeak mask
     #  2. feed training data to the model in batches
@@ -342,16 +410,38 @@ def train_model(model, opt):
     #  8. save model weights to file specified in opt.savename
     #  SEE trainer.py for examples of each of the above
     
-def test_model(model, opt, epoch):
+
+def calculate_perplexity(loss):
+    return torch.exp(torch.tensor(loss))
+
+def test_model(model, opt, data_loader):
     print("testing model...")
     model.eval()
-    
-    # write code to generate perplexity of test set
-    
+    total_loss = 0
+    total_tokens = 0
+
+    with torch.no_grad():
+        for input_seq, target_seq in data_loader:
+            input_seq = input_seq.to(opt.device)
+            target_seq = target_seq.to(opt.device)
+            src_mask = create_mask(input_seq, opt.src_pad)
+            trg_mask = create_mask(target_seq, opt.trg_pad)
+
+            output = model(input_seq, target_seq, src_mask, trg_mask) 
+            output_flat = output.view(-1, opt.vocab_size)
+            target_flat = target_seq.view(-1)  
+
+            loss = F.cross_entropy(output_flat, target_flat, ignore_index=opt.trg_pad)
+            total_loss += loss.item() * target_seq.numel()
+            total_tokens += target_seq.numel()
+
+    avg_loss = total_loss / total_tokens
+    perplexity = calculate_perplexity(avg_loss)
+    print(f"Test Perplexity: {perplexity}")
     model.train()
+    return perplexity
 
 def main():
-    
     random.seed(10)
     
     parser = argparse.ArgumentParser()
@@ -362,7 +452,7 @@ def main():
     parser.add_argument('-n_layers', type=int, default=6)
     parser.add_argument('-heads', type=int, default=8)
     parser.add_argument('-dropout', type=int, default=0.1)
-    parser.add_argument('-batchsize', type=int, default=1)
+    parser.add_argument('-batchsize', type=int, default=16)
     parser.add_argument('-printevery', type=int, default=100)
     parser.add_argument('-lr', type=int, default=0.00001)
     parser.add_argument('-seqlen', type=int, default=512)
@@ -389,16 +479,16 @@ def main():
     source_name = sys.argv[0]
     dir_name = dir_name + "//"
     opt.dir_name = dir_name
-    shutil.copy(source_name,dir_name + source_name)
+    os.makedirs(source_name+dir_name,exist_ok=True)
+    shutil.copy(source_name, source_name+dir_name)
     opt.log_file = dir_name + "log_file.txt"
     
     print(str(opt))
     
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-    opt.train = read_corpus('wiki2.train.txt',tokenizer)
+    opt.train = read_corpus('wiki2.train.txt',tokenizer) # 2411664 tokens
     opt.valid = read_corpus('wiki2.valid.txt',tokenizer)
     opt.test = read_corpus('wiki2.test.txt',tokenizer)
-    
     obs = len(opt.train)
     opt.vocab_size = 50257
     temp = []
@@ -427,7 +517,8 @@ def main():
     opt.trg_pad = 0
             
     train_model(model,opt)
-    test_model(model,opt,-1)
+    test_data = create_batches(opt.test, opt.batchsize, opt.seqlen, opt.src_pad)
+    test_model(model,opt,test_data)
         
 if __name__ == "__main__":
     main()        
