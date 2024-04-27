@@ -255,31 +255,33 @@ class DecoderLayer(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, vocab_size, d_model, N, heads, dropout):
+    def __init__(self, vocab_size, max_sequence_length, d_model, N, heads, dropout):
         super().__init__()
         self.N = N
         self.embed = Embedder(vocab_size, d_model)
-        self.pe = PositionalEncoder(d_model, dropout=dropout)
+        self.pe = PositionalEncoder(d_model, max_seq_len=max_sequence_length, dropout=dropout)
         self.layers = get_clones(DecoderLayer(d_model, heads, dropout), N)
         self.norm = Norm(d_model)
+        self.trg_mask = torch.triu(torch.ones((max_sequence_length, max_sequence_length))).T
 
-    def forward(self, trg, trg_mask):
+    def forward(self, trg):
         x = self.embed(trg)
         x = self.pe(x)
         for i in range(self.N):
-            x = self.layers[i](x, trg_mask)
+            x = self.layers[i](x, self.trg_mask)
         return self.norm(x)
 
 
 class Transformer(nn.Module):
-    def __init__(self, trg_vocab, d_model, N, heads, dropout):
+    def __init__(self, trg_vocab, max_sequence_length, d_model, N, heads, dropout):
         super().__init__()
-        self.decoder = Decoder(trg_vocab, d_model, N, heads, dropout)
+        self.decoder = Decoder(trg_vocab, max_sequence_length, d_model, N, heads, dropout)
         self.out = nn.Linear(d_model, trg_vocab)
 
-    def forward(self, trg, trg_mask):
+
+    def forward(self, trg):
         # print("DECODER")
-        d_output = self.decoder(trg, trg_mask)
+        d_output = self.decoder(trg)
         output = self.out(d_output)
         return output
 
@@ -288,7 +290,7 @@ def get_model(opt, trg_vocab):
     assert opt.d_model % opt.heads == 0
     assert opt.dropout < 1
 
-    model = Transformer(trg_vocab, opt.d_model, opt.n_layers, opt.heads, opt.dropout)
+    model = Transformer(trg_vocab, opt.max_sequence_length, opt.d_model, opt.n_layers, opt.heads, opt.dropout)
     model.to(opt.device)
 
     if opt.loadname is not None:
@@ -305,6 +307,7 @@ def get_model(opt, trg_vocab):
 def train_model(model, opt):
     print("training model...")
     model.train()
+
 
     # write code to:
     #  1. create a nopeak mask
@@ -375,7 +378,7 @@ def main():
     opt.valid = read_corpus('wiki2.valid.txt', tokenizer)
     opt.test = read_corpus('wiki2.test.txt', tokenizer)
 
-    obs = len(opt.train)
+    opt.max_sequence_length = 4096
     opt.vocab_size = 50257
     temp = []
     for i in range(opt.vocab_size):
