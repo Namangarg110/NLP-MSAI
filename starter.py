@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.autograd import Variable
+from torcheval.metrics import Perplexity
 from transformers import GPT2TokenizerFast
 
 
@@ -46,7 +47,7 @@ class PositionalEncoder(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.dropout = nn.Dropout(dropout)
-        # create constant 'pe' matrix with values dependant on 
+        # create constant 'pe' matrix with values dependant on
         # pos and i
         pe = torch.zeros(max_seq_len, d_model)
         for pos in range(max_seq_len):
@@ -262,13 +263,12 @@ class Decoder(nn.Module):
         self.pe = PositionalEncoder(d_model, max_seq_len=max_sequence_length, dropout=dropout)
         self.layers = get_clones(DecoderLayer(d_model, heads, dropout), N)
         self.norm = Norm(d_model)
-        self.trg_mask = torch.triu(torch.ones((max_sequence_length, max_sequence_length))).T
 
-    def forward(self, trg):
+    def forward(self, trg, trg_mask):
         x = self.embed(trg)
         x = self.pe(x)
         for i in range(self.N):
-            x = self.layers[i](x, self.trg_mask)
+            x = self.layers[i](x, trg_mask)
         return self.norm(x)
 
 
@@ -278,10 +278,9 @@ class Transformer(nn.Module):
         self.decoder = Decoder(trg_vocab, max_sequence_length, d_model, N, heads, dropout)
         self.out = nn.Linear(d_model, trg_vocab)
 
-
-    def forward(self, trg):
+    def forward(self, trg, trg_mask):
         # print("DECODER")
-        d_output = self.decoder(trg)
+        d_output = self.decoder(trg, trg_mask)
         output = self.out(d_output)
         return output
 
@@ -290,7 +289,7 @@ def get_model(opt, trg_vocab):
     assert opt.d_model % opt.heads == 0
     assert opt.dropout < 1
 
-    model = Transformer(trg_vocab, opt.max_sequence_length, opt.d_model, opt.n_layers, opt.heads, opt.dropout)
+    model = Transformer(trg_vocab, opt.seqlen, opt.d_model, opt.n_layers, opt.heads, opt.dropout)
     model.to(opt.device)
 
     if opt.loadname is not None:
@@ -304,56 +303,103 @@ def get_model(opt, trg_vocab):
     return model
 
 
+def evaluate(model, data, opt, is_training):
+    if is_training:
+        model.train()
+    else:
+        model.eval()
+    seq_len = opt.seqlen
+    batch_size = opt.batch_size
+    batch_step = seq_len * batch_size
+    optimizer = opt.optimizer
+    nopeak_mask = opt.mask
+    corpora = torch.tensor([*data], device='cuda')
+    data_len = len(corpora)
+    batch_count = data_len // batch_step
+    ppl_eval = opt.ppl_eval
+    batch_indices = np.arange(batch_count)
+    np.random.shuffle(batch_indices)
+    batch_losses = []
+    batch_ppls = []
+    for i in range(batch_count):
+        if i % opt.printevery == 0:
+            print(f'\nBatch {i}/{batch_count}: ', end='')
+        bi = batch_indices[i]
+        batch_start = bi * batch_step
+        batch_end = batch_start + batch_step
+        batch = corpora[batch_start:batch_end].view((batch_size, seq_len))
+        label = corpora[batch_start + 1:min(batch_end + 1, data_len)].view((batch_size, seq_len))
+        logits = model.forward(batch, nopeak_mask)
+        loss = F.cross_entropy(logits.movedim(-2, -1), label)
+        if is_training:
+            loss.backward()
+            optimizer.step()
+        ppl_eval.update(logits, label)
+        ppl = ppl_eval.compute()
+        batch_losses.append(loss.item())
+        batch_ppls.append(ppl.item())
+        print('.', end='')
+        if (i + 1) % opt.printevery == 0:
+            print(f'<L:{loss} P:{ppl}>', end='')
+    print('\ndone')
+
+    return batch_losses, batch_ppls
+
+
 def train_model(model, opt):
     print("training model...")
-    model.train()
+    train_corpora = torch.tensor([*opt.train]).cuda()
+    valid_corpora = torch.tensor([*opt.valid]).cuda()
+    for e in range(opt.epochs):
+        print(f'Epoch {e}:')
+        epoch_loss, epoch_ppl = evaluate(model, train_corpora, opt, True)
+        valid_loss, valid_ppl = evaluate(model, valid_corpora, opt, False)
+        print(f'\nEpoch {e} Result:')
+        print(f'\n\tTraining\n\t\tMean Loss: {np.mean(epoch_loss)}\n\t\tMean Perplexity: {np.mean(epoch_ppl)}')
+        print(f'\n\tValidation\n\t\tMean Loss: {np.mean(valid_loss)}\n\t\tMean Perplexity: {np.mean(valid_ppl)}')
 
+        if opt.savename is not None:
+            torch.save(model, f'{opt.savename}/model.pt')
 
-    # write code to:
-    #  1. create a nopeak mask
-    #  2. feed training data to the model in batches
-    #  3. send the indices of training tokens to the GPU
-    #  4. linearize the predictions and compute the loss against ground truth
-    #     (you can use F.cross_entropy or write your own code)
-    #  5. calculate and apply the gradients with loss.backward() and optimizer.step()
-    #  6. report intermediate trainining perplexity
-    #  7. generate a test perplexity once per training epoch by calling test_model()
-    #  8. save model weights to file specified in opt.savename
-    #  SEE trainer.py for examples of each of the above
+        test_model(model, opt, e)
 
 
 def test_model(model, opt, epoch):
     print("testing model...")
-    model.eval()
-
-    # write code to generate perplexity of test set
-
-    model.train()
+    test_corpora = torch.tensor([*opt.test]).cuda()
+    test_loss, test_ppl = evaluate(model, test_corpora, opt, False)
+    print(f'Epoch {epoch}:\n\tTest\n\t\tMean Loss: {np.mean(test_loss)}\n\t\tMean Perplexity: {np.mean(test_ppl)}')
 
 
 def main():
     random.seed(10)
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-no_cuda', action='store_true')
-    parser.add_argument('-SGDR', action='store_true')
-    parser.add_argument('-epochs', type=int, default=20)
-    parser.add_argument('-d_model', type=int, default=512)
-    parser.add_argument('-n_layers', type=int, default=6)
-    parser.add_argument('-heads', type=int, default=8)
-    parser.add_argument('-dropout', type=int, default=0.1)
-    parser.add_argument('-batchsize', type=int, default=1)
-    parser.add_argument('-printevery', type=int, default=100)
-    parser.add_argument('-lr', type=int, default=0.00001)
-    parser.add_argument('-seqlen', type=int, default=512)
-    parser.add_argument('-threshold', type=int, default=3)
-    parser.add_argument('-savename', type=str)
-    parser.add_argument('-loadname', type=str)
-    parser.add_argument('-tied', type=int, default=1)
-    parser.add_argument('-dir_name', type=str, default='model')
-    parser.add_argument('-norm', type=float, default=2.0)
+    opt = argparse.Namespace()
+    opt.no_cuda = False
+    opt.SGDR = False
+    opt.epochs = 20
+    opt.d_model = 512
+    opt.n_layers = 6
+    opt.heads = 8
+    opt.dropout = 0.1
+    opt.batchsize = 16
+    opt.printevery = 100
+    opt.lr = 0.00001
+    opt.seqlen = 512
+    opt.threshold = 3
+    opt.savename = None
+    opt.loadname = None
+    opt.tied = 1
+    opt.dir_name = 'model'
+    opt.norm = 2.0
+    opt.train = None
+    opt.valid = None
+    opt.test = None
+    opt.train_len = None
+    opt.log_file = None
+    opt.time_name = None
+    opt.norm = 2.0
 
-    opt = parser.parse_args()
     opt.verbose = False
 
     opt.device = 0 if opt.no_cuda is False else -1
@@ -368,18 +414,27 @@ def main():
     source_name = sys.argv[0].split('\\')[-1]
     dir_name = dir_name + "//"
     opt.dir_name = dir_name
-    shutil.copy(source_name, dir_name + source_name)
+    # shutil.copy(source_name, dir_name + source_name)
     opt.log_file = dir_name + "log_file.txt"
 
     print(str(opt))
 
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-    opt.train = read_corpus('wiki2.train.txt', tokenizer)
-    opt.valid = read_corpus('wiki2.valid.txt', tokenizer)
-    opt.test = read_corpus('wiki2.test.txt', tokenizer)
 
-    opt.max_sequence_length = 4096
+    data_dir = '.'
+
+    opt.train = read_corpus(f'{data_dir}/wiki2.train.txt', tokenizer)
+    opt.valid = read_corpus(f'{data_dir}/wiki2.valid.txt', tokenizer)
+    opt.test = read_corpus(f'{data_dir}/wiki2.test.txt', tokenizer)
+
+    opt.savename = './saved/model'
+    opt.batch_size = opt.batchsize
     opt.vocab_size = 50257
+    opt.trg_pad = 0
+    opt.mask = torch.broadcast_to(torch.triu(torch.ones((opt.seqlen, opt.seqlen))).T,
+                                  (opt.batch_size, opt.seqlen, opt.seqlen)).cuda()
+    opt.ppl_eval = Perplexity(device='cuda', ignore_index=opt.trg_pad)
+
     temp = []
     for i in range(opt.vocab_size):
         temp.append(i)
@@ -402,8 +457,6 @@ def main():
             os.mkdir(opt.savename)
         except:
             nothing = 1
-    opt.src_pad = 0
-    opt.trg_pad = 0
 
     train_model(model, opt)
     test_model(model, opt, -1)
