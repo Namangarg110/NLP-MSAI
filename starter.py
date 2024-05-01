@@ -36,7 +36,7 @@ class Embedder(nn.Module):
     def __init__(self, vocab_size, d_model):
         super().__init__()
         self.d_model = d_model
-        self.embed = nn.Embedding(vocab_size, d_model)
+        self.embed = nn.Embedding(vocab_size, d_model, padding_idx=0)
 
     def forward(self, x):
         return self.embed(x.int())
@@ -303,72 +303,78 @@ def get_model(opt, trg_vocab):
     return model
 
 
-def evaluate(model, data, opt, is_training):
+def create_padded_corpora(tokenized_corpora, opt):
+    corpus_len = len(tokenized_corpora)
+    batch_len = (opt.seqlen * opt.batchsize)
+    pad_len = (batch_len - (corpus_len % batch_len)) + 1 #  + 1 for the labels
+    return torch.tensor([*tokenized_corpora, *np.repeat(opt.trg_pad, pad_len)], dtype=torch.int32).cuda(), corpus_len
+
+
+def evaluate(model, padded_corpora, opt, is_training):
     if is_training:
         model.train()
     else:
         model.eval()
     seq_len = opt.seqlen
-    batch_size = opt.batch_size
-    batch_step = seq_len * batch_size
+    batchsize = opt.batchsize
+    batch_step = seq_len * batchsize
     optimizer = opt.optimizer
     nopeak_mask = opt.mask
-    corpora = torch.tensor([*data], device='cuda')
-    data_len = len(corpora)
-    batch_count = data_len // batch_step
-    ppl_eval = opt.ppl_eval
+    corpora, data_len = padded_corpora
+    batch_count = data_len // batch_step + (data_len % batch_step != 0)
     batch_indices = np.arange(batch_count)
     np.random.shuffle(batch_indices)
     batch_losses = []
-    batch_ppls = []
     for i in range(batch_count):
         if i % opt.printevery == 0:
             print(f'\nBatch {i}/{batch_count}: ', end='')
         bi = batch_indices[i]
         batch_start = bi * batch_step
         batch_end = batch_start + batch_step
-        batch = corpora[batch_start:batch_end].view((batch_size, seq_len))
-        label = corpora[batch_start + 1:min(batch_end + 1, data_len)].view((batch_size, seq_len))
+        batch = corpora[batch_start:batch_end].view((batchsize, seq_len))
+        label = corpora[batch_start + 1:batch_end + 1].view((batchsize, seq_len))
         logits = model.forward(batch, nopeak_mask)
-        loss = F.cross_entropy(logits.movedim(-2, -1), label)
+        loss = F.cross_entropy(logits[1:, :, :].movedim(-2, -1), label[1:].to(torch.long), ignore_index=0)
         if is_training:
             loss.backward()
             optimizer.step()
-        ppl_eval.update(logits, label)
-        ppl = ppl_eval.compute()
         batch_losses.append(loss.item())
-        batch_ppls.append(ppl.item())
         print('.', end='')
-        if (i + 1) % opt.printevery == 0:
-            print(f'<L:{loss} P:{ppl}>', end='')
     print('\ndone')
 
-    return batch_losses, batch_ppls
+    return batch_losses
+
+
+def calc_perplexity(train_history):
+    mean_loss = np.mean(train_history)
+    ppl = np.exp(mean_loss)
+    return ppl
 
 
 def train_model(model, opt):
     print("training model...")
-    train_corpora = torch.tensor([*opt.train]).cuda()
-    valid_corpora = torch.tensor([*opt.valid]).cuda()
+    train_corpora = create_padded_corpora(opt.train, opt)
+    valid_corpora = create_padded_corpora(opt.valid, opt)
+    test_corpora = create_padded_corpora(opt.test, opt)
+
+    train_history = []
     for e in range(opt.epochs):
         print(f'Epoch {e}:')
-        epoch_loss, epoch_ppl = evaluate(model, train_corpora, opt, True)
-        valid_loss, valid_ppl = evaluate(model, valid_corpora, opt, False)
-        print(f'\nEpoch {e} Result:')
-        print(f'\n\tTraining\n\t\tMean Loss: {np.mean(epoch_loss)}\n\t\tMean Perplexity: {np.mean(epoch_ppl)}')
-        print(f'\n\tValidation\n\t\tMean Loss: {np.mean(valid_loss)}\n\t\tMean Perplexity: {np.mean(valid_ppl)}')
+        train_loss = evaluate(model, train_corpora, opt, True)
+        valid_loss = evaluate(model, valid_corpora, opt, False)
+        test_loss = evaluate(model, test_corpora, opt, False)
+        print(f'\nEpoch {e} Resulst:')
+        print(f'\tTrain - Loss: {np.mean(train_loss)} PPL: {calc_perplexity(train_loss)}')
+        print(f'\tValid - Loss: {np.mean(valid_loss)} PPL: {calc_perplexity(valid_loss)}')
+        print(f'\tTest - Loss: {np.mean(test_loss)} PPL: {calc_perplexity(test_loss)}')
+
+        train_history.extend(train_loss)
 
         if opt.savename is not None:
             torch.save(model, f'{opt.savename}/model.pt')
 
-        test_model(model, opt, e)
-
-
-def test_model(model, opt, epoch):
-    print("testing model...")
-    test_corpora = torch.tensor([*opt.test]).cuda()
-    test_loss, test_ppl = evaluate(model, test_corpora, opt, False)
-    print(f'Epoch {epoch}:\n\tTest\n\t\tMean Loss: {np.mean(test_loss)}\n\t\tMean Perplexity: {np.mean(test_ppl)}')
+    print(f'\nFinal Results:')
+    print(f'\tTrain - Loss: {np.mean(train_history)} PPL: {calc_perplexity(train_history)}')
 
 
 def main():
@@ -382,7 +388,7 @@ def main():
     opt.n_layers = 6
     opt.heads = 8
     opt.dropout = 0.1
-    opt.batchsize = 16
+    opt.batchsize = 20
     opt.printevery = 100
     opt.lr = 0.00001
     opt.seqlen = 512
@@ -398,8 +404,6 @@ def main():
     opt.train_len = None
     opt.log_file = None
     opt.time_name = None
-    opt.norm = 2.0
-
     opt.verbose = False
 
     opt.device = 0 if opt.no_cuda is False else -1
@@ -411,35 +415,26 @@ def main():
     opt.time_name = time_name
     dir_name = "saved/%s" % opt.dir_name
     ensure_directory_path_exists(dir_name)
-    source_name = sys.argv[0].split('\\')[-1]
     dir_name = dir_name + "//"
     opt.dir_name = dir_name
-    # shutil.copy(source_name, dir_name + source_name)
     opt.log_file = dir_name + "log_file.txt"
 
     print(str(opt))
 
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 
+    # change this to wherever your data is
     data_dir = '.'
 
     opt.train = read_corpus(f'{data_dir}/wiki2.train.txt', tokenizer)
     opt.valid = read_corpus(f'{data_dir}/wiki2.valid.txt', tokenizer)
     opt.test = read_corpus(f'{data_dir}/wiki2.test.txt', tokenizer)
-
     opt.savename = './saved/model'
-    opt.batch_size = opt.batchsize
     opt.vocab_size = 50257
     opt.trg_pad = 0
     opt.mask = torch.broadcast_to(torch.triu(torch.ones((opt.seqlen, opt.seqlen))).T,
-                                  (opt.batch_size, opt.seqlen, opt.seqlen)).cuda()
+                                  (opt.batchsize, opt.seqlen, opt.seqlen)).cuda()
     opt.ppl_eval = Perplexity(device='cuda', ignore_index=opt.trg_pad)
-
-    temp = []
-    for i in range(opt.vocab_size):
-        temp.append(i)
-    opt.indices = torch.tensor(temp)
-    opt.indices = opt.indices.cuda()
 
     model = get_model(opt, opt.vocab_size)
 
@@ -459,7 +454,6 @@ def main():
             nothing = 1
 
     train_model(model, opt)
-    test_model(model, opt, -1)
 
 
 if __name__ == "__main__":
