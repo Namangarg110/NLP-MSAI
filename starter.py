@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torch.autograd import Variable
 from transformers import GPT2TokenizerFast
+from torch.utils.data import Dataset
 
 def read_corpus(filename,tokenizer):
     seq = []
@@ -31,6 +32,7 @@ class Embedder(nn.Module):
         self.d_model = d_model
         self.embed = nn.Embedding(vocab_size, d_model)
     def forward(self, x):
+        x = x.to(next(self.embed.parameters()).device)
         return self.embed(x.int())
 
 class PositionalEncoder(nn.Module):
@@ -80,14 +82,20 @@ class Norm(nn.Module):
 
 def attention(q, k, v, d_k, mask=None, dropout=None):
     
+    # print("q:", q.shape)
     scores = torch.matmul(q, k.transpose(-2, -1)) /  math.sqrt(d_k)
-    
+    # print("scores: ", scores.shape)
     if mask is not None:
-        mask = mask.unsqueeze(1)
+        # print(f"mask shape: {mask.shape}")
+        #mask = mask.unsqueeze(1)
+        # print(f"scores shape: {scores.shape}")
+        # print(f"mask shape: {mask.shape}")
         scores = scores.masked_fill(mask == 0, -1e9)
     
     scores = F.softmax(scores, dim=-1)
-    
+    # print(f"scores shape: {scores.shape}")
+    # print(f"mask shape: {mask.shape}")
+
     if dropout is not None:
         scores = dropout(scores)
         
@@ -112,7 +120,7 @@ class MultiHeadAttention(nn.Module):
     def forward(self, q, k, v, mask=None):
         
         bs = q.size(0)
-        
+        # print("bs, self.h, self.d_k", bs, self.h, self.d_k)
         # perform linear operation and split into N heads
         k = self.k_linear(k).view(bs, -1, self.h, self.d_k)
         q = self.q_linear(q).view(bs, -1, self.h, self.d_k)
@@ -254,13 +262,13 @@ class DecoderLayer(nn.Module):
         self.attn_2 = MultiHeadAttention(heads, d_model, dropout=dropout)
         self.ff = FeedForward(d_model, dropout=dropout)
 
-    def forward(self, x, e_outputs, src_mask, trg_mask):
+    def forward(self, x, trg_mask):
         x2 = self.norm_1(x)
         x = x + self.dropout_1(self.attn_1(x2, x2, x2, trg_mask))
         x2 = self.norm_2(x)
-        x = x + self.dropout_2(self.attn_2(x2, e_outputs, e_outputs, \
-        src_mask))
-        x2 = self.norm_3(x)
+        # x = x + self.dropout_2(self.attn_2(x2, e_outputs, e_outputs, \
+        # src_mask))
+        # x2 = self.norm_3(x)
         x = x + self.dropout_3(self.ff(x2))
         return x    
     
@@ -287,32 +295,32 @@ class Decoder(nn.Module):
         self.pe = PositionalEncoder(d_model, dropout=dropout)
         self.layers = get_clones(DecoderLayer(d_model, heads, dropout), N)
         self.norm = Norm(d_model)
-    def forward(self, trg, e_outputs, src_mask, trg_mask):
+    def forward(self, trg, trg_mask):
         x = self.embed(trg)
         x = self.pe(x)
         for i in range(self.N):
-            x = self.layers[i](x, e_outputs, src_mask, trg_mask)
+            x = self.layers[i](x, trg_mask)
         return self.norm(x)
 
 class Transformer(nn.Module):
-    def __init__(self, src_vocab, trg_vocab, d_model, N, heads, dropout):
+    def __init__(self, trg_vocab, d_model, N, heads, dropout):
         super().__init__()
-        self.encoder = Encoder(src_vocab, d_model, N, heads, dropout)
+        # self.encoder = Encoder(src_vocab, d_model, N, heads, dropout)
         self.decoder = Decoder(trg_vocab, d_model, N, heads, dropout)
         self.out = nn.Linear(d_model, trg_vocab)
-    def forward(self, src, trg, src_mask, trg_mask):
-        e_outputs = self.encoder(src, src_mask)
+    def forward(self, trg, trg_mask):
+        # e_outputs = self.encoder(src, src_mask)
         #print("DECODER")
-        d_output = self.decoder(trg, e_outputs, src_mask, trg_mask)
+        d_output = self.decoder(trg, trg_mask)
         output = self.out(d_output)
         return output
 
-def get_model(opt, src_vocab, trg_vocab):
+def get_model(opt, trg_vocab):
     
     assert opt.d_model % opt.heads == 0
     assert opt.dropout < 1
 
-    model = Transformer(src_vocab, trg_vocab, opt.d_model, opt.n_layers, opt.heads, opt.dropout)
+    model = Transformer(trg_vocab, opt.d_model, opt.n_layers, opt.heads, opt.dropout)
     model.to(opt.device)
        
     if opt.loadname is not None:
@@ -324,12 +332,114 @@ def get_model(opt, src_vocab, trg_vocab):
                 nn.init.xavier_uniform_(p) 
     
     return model
+
+##############################################################################################################################    
+def create_no_peak_mask(bs, seq_len, num_heads):
+    # Create a base mask with shape [seq_len, seq_len]
+    mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
     
-def train_model(model, opt):
+    # Reshape to add batch and head dimensions [1, 1, seq_len, seq_len]
+    mask = mask[None, None, :, :]
+    
+    # Expand the mask to match the batch size and number of heads
+    mask = mask.expand(bs, num_heads, seq_len, seq_len)
+    
+    return mask
+
+
+class SimpleDataLoader:
+    def __init__(self, text_file, tokenizer, max_seq_len, batch_size=1, shuffle=False):
+        self.tokenized_text = read_corpus(text_file, tokenizer)
+        self.max_seq_len = max_seq_len
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.indices = list(range(len(self.tokenized_text) - max_seq_len))
+        if self.shuffle:
+            random.shuffle(self.indices)
+        self.idx = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.idx >= len(self.indices):
+            raise StopIteration
+        batch_indices = self.indices[self.idx:self.idx + self.batch_size]
+        batch = [
+            (
+                torch.tensor(self.tokenized_text[i:i+self.max_seq_len], dtype=torch.long),
+                torch.tensor(self.tokenized_text[i+1:i+self.max_seq_len+1], dtype=torch.long)
+            )
+            for i in batch_indices
+        ]
+        self.idx += self.batch_size
+        input_batch, target_batch = zip(*batch)
+        return torch.stack(input_batch), torch.stack(target_batch)
+    
+def calculate_perplexity(loss, num_tokens):
+    # Calculate average negative log likelihood (cross-entropy loss)
+    avg_nll = loss / num_tokens
+    
+    # Calculate perplexity
+    perplexity = math.exp(avg_nll)
+    
+    return perplexity
+
+def save_model(model, optimizer, epoch, path="model_save"):
+    """
+    Save the model and optimizer state.
+    
+    Args:
+        model (torch.nn.Module): The model to save.
+        optimizer (torch.optim.Optimizer): The optimizer to save.
+        epoch (int): The current epoch number.
+        path (str): Base directory to save the models.
+    """
+    if not os.path.exists(path):
+        os.makedirs(path)
+    filename = f"model_epoch_{epoch+1}.pt"
+    filepath = os.path.join(path, filename)
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict()
+    }, filepath)
+    print(f"Model saved to {filepath}")
+
+def train_model(model, opt, loader):
     
     print("training model...")
+    
+    model.to(opt.device)
     model.train()
     
+    #no peak mask
+    mask = create_no_peak_mask(opt.batchsize, opt.seqlen, opt.heads)
+    mask = mask.to("cuda")
+    for epoch in range(opt.epochs):
+        loss_per_epoch = []
+        for input_ids, target_ids in loader:
+
+            target_ids = target_ids.cuda()
+
+            logits = model(input_ids, mask)  # Shape: [16, 512, 50257]
+            logits = logits.view(-1, logits.size(-1))  # Shape: [16 * 512, 50257]
+            target_ids = target_ids.view(-1)  # Shape: [16 * 512]
+
+            loss = F.cross_entropy(logits, target_ids)
+            
+            opt.optimizer.zero_grad()
+            loss.backward()
+            opt.optimizer.step()
+            
+            loss_per_epoch.append(loss)
+        
+        print(f'Loss for epoch {epoch+1}: {loss_per_epoch.sum():.4f}')
+        print(calculate_perplexity(loss, opt.seqlen))
+        # Save model at the end of each epoch
+        save_model(model, opt.optimizer, epoch, path="/content/drive/MyDrive/HW#2/saved")
+
+        
     # write code to:
     #  1. create a nopeak mask
     #  2. feed training data to the model in batches
@@ -341,14 +451,16 @@ def train_model(model, opt):
     #  7. generate a test perplexity once per training epoch by calling test_model()
     #  8. save model weights to file specified in opt.savename
     #  SEE trainer.py for examples of each of the above
-    
-def test_model(model, opt, epoch):
+
+##################################################################################################################################
+
+def test_model(model, opt, loader):
     print("testing model...")
     model.eval()
     
     # write code to generate perplexity of test set
     
-    model.train()
+    # model.train()
 
 def main():
     
@@ -374,6 +486,10 @@ def main():
     parser.add_argument('-norm', type=float, default=2.0)
                 
     opt = parser.parse_args()
+    
+    opt.batchsize = 16
+    opt.seqlen = 512
+    
     opt.verbose = False    
     
     opt.device = 0 if opt.no_cuda is False else -1
@@ -407,7 +523,7 @@ def main():
     opt.indices = torch.tensor(temp)
     opt.indices = opt.indices.cuda()
     
-    model = get_model(opt,opt.vocab_size,opt.vocab_size)
+    model = get_model(opt,opt.vocab_size)
         
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
     params = sum([np.prod(p.size()) for p in model_parameters])        
@@ -423,11 +539,19 @@ def main():
             os.mkdir(opt.savename)
         except:
             nothing = 1
+            
     opt.src_pad = 0
     opt.trg_pad = 0
+    opt.epochs = 5
             
-    train_model(model,opt)
-    test_model(model,opt,-1)
+    # train_dataset = TextDataset('wiki2.train.txt', tokenizer, opt.seqlen)
+    # valid_dataset = TextDataset('wiki2.valid.txt', tokenizer, opt.seqlen)
+    # train_loader = DataLoader(train_dataset, batch_size=opt.batchsize, shuffle=True)
+    # valid_loader = DataLoader(valid_dataset, batch_size=opt.batchsize, shuffle=True)
+    train_loader = SimpleDataLoader('wiki2.train.txt', tokenizer, max_seq_len=opt.seqlen, batch_size=opt.batchsize, shuffle=True)
+    valid_loader = SimpleDataLoader('wiki2.valid.txt', tokenizer, max_seq_len=opt.seqlen , batch_size=opt.batchsize, shuffle=True)
+    train_model(model,opt, train_loader)
+    # test_model(model,opt, valid_loader)
         
 if __name__ == "__main__":
     main()        
