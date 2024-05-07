@@ -88,9 +88,22 @@ class Norm(nn.Module):
                / (x.std(dim=-1, keepdim=True) + self.eps) + self.bias
         return norm
 
+#################### PART 3 ########################
+def compute_pairwise_distances(q, k):
+    q_norm = torch.sum(q ** 2, dim=-1, keepdim=True)  # Shape: (batch, heads, query_len, 1)
+    k_norm = torch.sum(k ** 2, dim=-1, keepdim=True)  # Shape: (batch, heads, key_len, 1)
+
+    qk_dot_product = torch.matmul(q, k.transpose(-2, -1))  # Shape: (batch, heads, query_len, key_len)
+
+    distances = q_norm + k_norm.transpose(-2, -1) - 2 * qk_dot_product  # Pairwise distance calculation
+    distances = torch.sqrt(torch.clamp(distances, min=0.0))  # Ensure distances are non-negative
+    return distances
 
 def attention(q, k, v, d_k, mask=None, dropout=None):
-    scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
+    """Compute attention using Euclidean distance instead of dot-product."""
+    distances = compute_pairwise_distances(q, k)  # Shape: (batch, heads, query_len, key_len)
+
+    scores = -distances
 
     if mask is not None:
         mask = mask.unsqueeze(1)
@@ -103,6 +116,21 @@ def attention(q, k, v, d_k, mask=None, dropout=None):
 
     output = torch.matmul(scores, v)
     return output
+
+# def attention(q, k, v, d_k, mask=None, dropout=None):
+#     scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
+
+#     if mask is not None:
+#         mask = mask.unsqueeze(1)
+#         scores = scores.masked_fill(mask == 0, -1e9)
+
+#     scores = F.softmax(scores, dim=-1)
+
+#     if dropout is not None:
+#         scores = dropout(scores)
+
+#     output = torch.matmul(scores, v)
+#     return output
 
 
 class MultiHeadAttention(nn.Module):
@@ -252,6 +280,7 @@ class DecoderLayer(nn.Module):
         x = x + self.dropout_1(self.attn_1(x2, x2, x2, trg_mask))
         x2 = self.norm_3(x)
         x = x + self.dropout_3(self.ff(x2))
+        # x = self.dropout_3(self.ff(x2)) ###### part 4 
         return x
 
 
