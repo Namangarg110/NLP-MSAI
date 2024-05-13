@@ -1,14 +1,9 @@
 import argparse
 import os
-import sys
-import shutil
-import random
 import numpy as np
 import time
 import copy
 import math
-import pickle
-
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
@@ -317,7 +312,6 @@ class Transformer(nn.Module):
 def get_model(opt, trg_vocab):
     assert opt.d_model % opt.heads == 0
     assert opt.dropout < 1
-
     model = Transformer(trg_vocab, opt.seqlen, opt.d_model, opt.n_layers, opt.heads, opt.dropout)
     model.to(opt.device)
 
@@ -407,33 +401,29 @@ def train_model(model, opt):
 
 
 def main():
-    random.seed(10)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-no_cuda', action='store_true')
+    parser.add_argument('-SGDR', action='store_true')
+    parser.add_argument('-epochs', type=int, default=100)
+    parser.add_argument('-d_model', type=int, default=512)
+    parser.add_argument('-n_layers', type=int, default=6)
+    parser.add_argument('-heads', type=int, default=8)
+    parser.add_argument('-dropout', type=int, default=0.1)
+    parser.add_argument('-batchsize', type=int, default=1)
+    parser.add_argument('-printevery', type=int, default=100)
+    parser.add_argument('-lr', type=int, default=0.00001)
+    parser.add_argument('-seqlen', type=int, default=512)
+    parser.add_argument('-threshold', type=int, default=3)
+    parser.add_argument('-savename', type=str)
+    parser.add_argument('-loadname', type=str)
+    parser.add_argument('-tied', type=int, default=1)
+    parser.add_argument('-dir_name', type=str, default='model')
+    parser.add_argument('-norm', type=float, default=2.0)
+    parser.add_argument('-seed', type=int, default=42)
+    opt = parser.parse_args()
 
-    opt = argparse.Namespace()
-    opt.no_cuda = False
-    opt.SGDR = False
-    opt.epochs = 20
-    opt.d_model = 512
-    opt.n_layers = 6
-    opt.heads = 8
-    opt.dropout = 0.1
-    opt.batchsize = 20
-    opt.printevery = 100
-    opt.lr = 0.00001
-    opt.seqlen = 512
-    opt.threshold = 3
-    opt.savename = None
-    opt.loadname = None
-    opt.tied = 1
-    opt.dir_name = 'model'
-    opt.norm = 2.0
-    opt.train = None
-    opt.valid = None
-    opt.test = None
-    opt.train_len = None
-    opt.log_file = None
-    opt.time_name = None
-    opt.verbose = False
+    np.random.seed(opt.seed)
+    torch.manual_seed(opt.seed)
 
     opt.device = 0 if opt.no_cuda is False else -1
     if opt.device == 0:
