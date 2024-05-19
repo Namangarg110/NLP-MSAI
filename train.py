@@ -83,6 +83,7 @@ class Norm(nn.Module):
                / (x.std(dim=-1, keepdim=True) + self.eps) + self.bias
         return norm
 
+
 #################### PART 3 ########################
 def compute_pairwise_distances(q, k):
     q_norm = torch.sum(q ** 2, dim=-1, keepdim=True)  # Shape: (batch, heads, query_len, 1)
@@ -94,7 +95,8 @@ def compute_pairwise_distances(q, k):
     distances = torch.sqrt(torch.clamp(distances, min=0.0))  # Ensure distances are non-negative
     return distances
 
-def attention(q, k, v, d_k, mask=None, dropout=None):
+
+def attention_euclid(q, k, v, d_k, mask=None, dropout=None):
     """Compute attention using Euclidean distance instead of dot-product."""
     distances = compute_pairwise_distances(q, k)  # Shape: (batch, heads, query_len, key_len)
 
@@ -112,20 +114,21 @@ def attention(q, k, v, d_k, mask=None, dropout=None):
     output = torch.matmul(scores, v)
     return output
 
-# def attention(q, k, v, d_k, mask=None, dropout=None):
-#     scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
 
-#     if mask is not None:
-#         mask = mask.unsqueeze(1)
-#         scores = scores.masked_fill(mask == 0, -1e9)
+def attention(q, k, v, d_k, mask=None, dropout=None):
+    scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
 
-#     scores = F.softmax(scores, dim=-1)
+    if mask is not None:
+        mask = mask.unsqueeze(1)
+        scores = scores.masked_fill(mask == 0, -1e9)
 
-#     if dropout is not None:
-#         scores = dropout(scores)
+    scores = F.softmax(scores, dim=-1)
 
-#     output = torch.matmul(scores, v)
-#     return output
+    if dropout is not None:
+        scores = dropout(scores)
+
+    output = torch.matmul(scores, v)
+    return output
 
 
 class MultiHeadAttention(nn.Module):
@@ -329,7 +332,7 @@ def get_model(opt, trg_vocab):
 def create_padded_corpora(tokenized_corpora, opt):
     corpus_len = len(tokenized_corpora)
     batch_len = (opt.seqlen * opt.batchsize)
-    pad_len = (batch_len - (corpus_len % batch_len)) + 1 #  + 1 for the labels
+    pad_len = (batch_len - (corpus_len % batch_len)) + 1  # + 1 for the labels
     return torch.tensor([*tokenized_corpora, *np.repeat(opt.trg_pad, pad_len)], dtype=torch.int32).cuda(), corpus_len
 
 
@@ -358,10 +361,10 @@ def evaluate(model, padded_corpora, opt, is_training):
         label = corpora[batch_start + 1:batch_end + 1].view((batchsize, seq_len))
         logits = model.forward(batch, nopeak_mask)
         loss = F.cross_entropy(logits[1:, :, :].movedim(-2, -1), label[1:].to(torch.long), ignore_index=0)
+        batch_losses.append(loss.item())
         if is_training:
             loss.backward()
             optimizer.step()
-        batch_losses.append(loss.item())
         print('.', end='')
     print('\ndone')
 
@@ -409,7 +412,7 @@ def main():
     parser.add_argument('-n_layers', type=int, default=6)
     parser.add_argument('-heads', type=int, default=8)
     parser.add_argument('-dropout', type=int, default=0.1)
-    parser.add_argument('-batchsize', type=int, default=1)
+    parser.add_argument('-batchsize', type=int, default=16)
     parser.add_argument('-printevery', type=int, default=100)
     parser.add_argument('-lr', type=int, default=0.00001)
     parser.add_argument('-seqlen', type=int, default=512)
@@ -425,9 +428,7 @@ def main():
     np.random.seed(opt.seed)
     torch.manual_seed(opt.seed)
 
-    opt.device = 0 if opt.no_cuda is False else -1
-    if opt.device == 0:
-        assert torch.cuda.is_available()
+    assert torch.cuda.is_available()
     opt.device = torch.device("cuda:0")
 
     time_name = time.strftime("%y%m%d_%H%M%S")
