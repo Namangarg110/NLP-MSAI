@@ -144,33 +144,39 @@ def test_fine_tuned_BERT(hparams):
     print(f'Test Results: Loss: {test_loss}, Accuracy: {test_acc}')
 
 
-def BERT_QA():
+def BERT_QA(hparams):
+    torch.set_default_device(hparams.device)
+    random.seed(hparams.seed)
+    np.random.seed(hparams.seed)
+    torch.manual_seed(hparams.seed)
+    hparams.model = QBERT("bert-base-uncased")
+    hparams.optimizer = optim.Adam(hparams.model.parameters(), lr=hparams.lr)
+    hparams.train_corpus = 'train_complete.jsonl'
+    hparams.valid_corpus = 'dev_complete.jsonl'
+    hparams.test_corpus = 'test_complete.jsonl'
+    fine_tune_BERT(hparams)
+    test_fine_tuned_BERT(hparams)
+
+
+def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument('-test', action='store_true')
+    parser.add_argument('-model_type', type=str, default='BERT')
     parser.add_argument('-device', type=str, default='cuda')
     parser.add_argument('-epochs', type=int, default=1)
     parser.add_argument('-lr', type=float, default=3e-5)
     parser.add_argument('-batch_size', type=int, default=64)
     parser.add_argument('-seed', type=int, default=1337)
     parser.add_argument('-max_len', type=int, default=40)
-    hparams = parser.parse_args()
-
-    torch.set_default_device(hparams.device)
-    random.seed(hparams.seed)
-    np.random.seed(hparams.seed)
-    torch.manual_seed(hparams.seed)
-
-    hparams.model = QBERT("bert-base-uncased")
-    hparams.optimizer = optim.Adam(hparams.model.parameters(), lr=hparams.lr)
-    hparams.train_corpus = 'train_complete.jsonl'
-    hparams.valid_corpus = 'dev_complete.jsonl'
-    hparams.test_corpus = 'test_complete.jsonl'
-
-    fine_tune_BERT(hparams)
-    test_fine_tuned_BERT(hparams)
+    args = parser.parse_args()
+    return args
 
 
 def main():
-    BERT_QA()
+    args = parse_args()
+    if args.model_type == 'BERT':
+        BERT_QA(args)
+    # add GPT case here
 
 
 if __name__ == "__main__":
