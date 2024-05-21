@@ -9,7 +9,7 @@ import json
 import numpy as np
 
 
-def load_corpus(file_name, tokenizer, hparams):
+def load_corpus(file_name):
     answers = ['A', 'B', 'C', 'D']
     sequences = []
 
@@ -31,7 +31,10 @@ def load_corpus(file_name, tokenizer, hparams):
                 label = 0
             obs.append([text, label])
         sequences.append(obs)
+    return sequences
 
+
+def format_data_for_BERT(sequences, tokenizer, hparams):
     tokenized_sequences = []
     tokenized_labels = []
     seq_lengths = []
@@ -84,7 +87,7 @@ class QBERT(torch.nn.Module):
         return x
 
 
-def evaluate(model, data, labels, masks, hparams, is_training=False):
+def evaluate_BERT(model, data, labels, masks, hparams, is_training=False):
     batch_size = hparams.batch_size
     batch_count = len(data) // batch_size
     model_loss = []
@@ -120,28 +123,28 @@ def evaluate(model, data, labels, masks, hparams, is_training=False):
     return np.mean(model_loss), np.mean(model_acc)
 
 
-def fine_tune_classification(hparams):
+def fine_tune_BERT(hparams):
     model = hparams.model
     epochs = hparams.epochs
-    train_x, train_y, train_masks = load_corpus(hparams.train_corpus, model.tokenizer, hparams)
-    valid_x, valid_y, valid_masks = load_corpus(hparams.valid_corpus, model.tokenizer, hparams)
+    train_x, train_y, train_masks = format_data_for_BERT(load_corpus(hparams.train_corpus), model.tokenizer, hparams)
+    valid_x, valid_y, valid_masks = format_data_for_BERT(load_corpus(hparams.valid_corpus), model.tokenizer, hparams)
 
     for e in range(epochs):
         print(f'\nStarting epoch {e + 1}:')
-        train_loss, train_acc = evaluate(model, train_x, train_y, train_masks, hparams, is_training=True)
-        valid_loss, valid_acc = evaluate(model, valid_x, valid_y, valid_masks, hparams)
+        train_loss, train_acc = evaluate_BERT(model, train_x, train_y, train_masks, hparams, is_training=True)
+        valid_loss, valid_acc = evaluate_BERT(model, valid_x, valid_y, valid_masks, hparams)
         print(
             f'Epoch {e + 1} Results:\n\tTraining - Loss: {train_loss}, Accuracy: {train_acc}\n\tValidation - Loss: {valid_loss}, Accuracy: {valid_acc}')
 
 
-def test_fine_tuned_model(hparams):
+def test_fine_tuned_BERT(hparams):
     model = hparams.model
-    test_x, test_y, test_masks = load_corpus(hparams.test_corpus, model.tokenizer, hparams)
-    test_loss, test_acc = evaluate(model, test_x, test_y, test_masks, hparams)
+    test_x, test_y, test_masks = format_data_for_BERT(load_corpus(hparams.test_corpus), model.tokenizer, hparams)
+    test_loss, test_acc = evaluate_BERT(model, test_x, test_y, test_masks, hparams)
     print(f'Test Results: Loss: {test_loss}, Accuracy: {test_acc}')
 
 
-def main():
+def BERT_QA():
     parser = argparse.ArgumentParser()
     parser.add_argument('-device', type=str, default='cuda')
     parser.add_argument('-epochs', type=int, default=1)
@@ -162,8 +165,12 @@ def main():
     hparams.valid_corpus = 'dev_complete.jsonl'
     hparams.test_corpus = 'test_complete.jsonl'
 
-    fine_tune_classification(hparams)
-    test_fine_tuned_model(hparams)
+    fine_tune_BERT(hparams)
+    test_fine_tuned_BERT(hparams)
+
+
+def main():
+    BERT_QA()
 
 
 if __name__ == "__main__":
