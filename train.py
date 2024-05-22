@@ -13,7 +13,8 @@ from transformers import GPT2TokenizerFast
 
 
 def ensure_directory_path_exists(directory_path):
-    os.makedirs(directory_path, exist_ok=True)
+    if directory_path is not None:
+        os.makedirs(directory_path, exist_ok=True)
 
 
 def read_corpus(filename, tokenizer):
@@ -398,6 +399,9 @@ def train_model(model, opt):
 
         if opt.savename is not None:
             torch.save(model, f'{opt.savename}/model.pt')
+            with open(f'{opt.savename}/params.txt', 'w') as param_file:
+                param_file.write(str(opt))
+                param_file.close()
 
     print(f'\nFinal Results:')
     print(f'\tTrain - Loss: {np.mean(train_history)} PPL: {calc_perplexity(train_history)}')
@@ -407,7 +411,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-no_cuda', action='store_true')
     parser.add_argument('-SGDR', action='store_true')
-    parser.add_argument('-epochs', type=int, default=100)
+    parser.add_argument('-epochs', type=int, default=20)
     parser.add_argument('-d_model', type=int, default=512)
     parser.add_argument('-n_layers', type=int, default=6)
     parser.add_argument('-heads', type=int, default=8)
@@ -467,12 +471,7 @@ def main():
     if opt.SGDR:
         opt.sched = CosineWithRestarts(opt.optimizer, T_max=opt.train_len)
 
-    if opt.savename is not None:
-        try:
-            os.mkdir(opt.savename)
-        except:
-            nothing = 1
-
+    ensure_directory_path_exists(opt.savename)
     train_model(model, opt)
 
 
