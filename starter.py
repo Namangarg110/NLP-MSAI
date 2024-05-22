@@ -1,5 +1,5 @@
 import random
-
+import os
 from transformers import AutoTokenizer, BertModel, GPT2LMHeadModel, GPT2Tokenizer
 import torch.optim as optim
 import torch.nn.functional as F
@@ -34,7 +34,7 @@ def load_corpus(file_name):
     return sequences
 
 
-def format_data_for_BERT(sequences, tokenizer, hparams):
+def format_data_for_BERT(sequences, tokenizer, hparams, is_training_set=False):
     tokenized_sequences = []
     tokenized_labels = []
     seq_lengths = []
@@ -45,7 +45,7 @@ def format_data_for_BERT(sequences, tokenizer, hparams):
         for s, l in seq:
             tokenized = tokenizer.tokenize(s)
             ids = [vocab[t] for t in tokenized]
-            target_seq = [vocab[str(l)], *ids]
+            target_seq = [tokenizer.cls_token_id, *ids]
             tokenized_sequences.append(target_seq)
             tokenized_labels.append(l)
             seq_len = len(target_seq)
@@ -63,6 +63,13 @@ def format_data_for_BERT(sequences, tokenizer, hparams):
     out_labels = np.zeros((len(tokenized_labels), 2))
     out_labels[:, 1] = tokenized_labels
     out_labels[:, 0] = 1 - out_labels[:, 1]
+
+    if (not is_training_set) and hparams.mcqa_test:
+        num_sequences = len(out_sequences)
+        assert num_sequences % 4 == 0
+        out_sequences = out_sequences.reshape((num_sequences // 4, 4, max_len))
+        out_labels = out_labels[:, 1].reshape((num_sequences // 4, 4))
+        out_masks = out_masks.reshape((num_sequences // 4, 4, max_len))
 
     out_sequences = torch.tensor(out_sequences, dtype=torch.int)
     out_labels = torch.tensor(out_labels, dtype=torch.float)
@@ -83,7 +90,6 @@ class QBERT(torch.nn.Module):
         # grab the CLS embedding from the last hidden state
         x = self.BERT(x, attention_mask=mask).last_hidden_state[:, 0, :]
         x = x @ self.linear
-        x = F.softmax(x, -1)
         return x
 
 
@@ -97,6 +103,11 @@ def evaluate_BERT(model, data, labels, masks, hparams, is_training=False):
     else:
         model.eval()
 
+    if hparams.mcqa_test and not is_training:
+        batch_output = torch.zeros((batch_size, 4), dtype=torch.float32)
+    else:
+        cls_weights = torch.tensor([0.25, 0.75])
+
     for b in range(batch_count):
         if b % 100 == 0:
             print(f'\nBatch [{b}/{batch_count}]: ', end='')
@@ -106,10 +117,17 @@ def evaluate_BERT(model, data, labels, masks, hparams, is_training=False):
         batch_labels = labels[batch_start:batch_end]
         batch_masks = masks[batch_start:batch_end]
 
-        batch_output = model(batch_data, batch_masks)
-        loss = F.binary_cross_entropy_with_logits(batch_output, batch_labels)
+        if hparams.mcqa_test and not is_training:
+            with torch.no_grad():
+                for i in range(4):
+                    result = model(batch_data[:, i, :], batch_masks[:, i, :])
+                    batch_output[:, i] = result[:, -1]
+            loss = F.cross_entropy(batch_output, batch_labels)
+        else:
+            batch_output = model(batch_data, batch_masks)
+            loss = F.binary_cross_entropy_with_logits(batch_output, batch_labels, weight=cls_weights)
         preds = torch.argmax(batch_output, dim=-1)
-        delta = [preds[i] == batch_labels[i, 1] for i in range(len(preds))]
+        delta = torch.eq(preds, torch.argmax(batch_labels, dim=-1))
         acc = sum(delta) / len(delta)
         if is_training:
             loss.backward()
@@ -126,7 +144,7 @@ def evaluate_BERT(model, data, labels, masks, hparams, is_training=False):
 def fine_tune_BERT(hparams):
     model = hparams.model
     epochs = hparams.epochs
-    train_x, train_y, train_masks = format_data_for_BERT(load_corpus(hparams.train_corpus), model.tokenizer, hparams)
+    train_x, train_y, train_masks = format_data_for_BERT(load_corpus(hparams.train_corpus), model.tokenizer, hparams, is_training_set=True)
     valid_x, valid_y, valid_masks = format_data_for_BERT(load_corpus(hparams.valid_corpus), model.tokenizer, hparams)
 
     for e in range(epochs):
@@ -141,7 +159,21 @@ def test_fine_tuned_BERT(hparams):
     model = hparams.model
     test_x, test_y, test_masks = format_data_for_BERT(load_corpus(hparams.test_corpus), model.tokenizer, hparams)
     test_loss, test_acc = evaluate_BERT(model, test_x, test_y, test_masks, hparams)
-    print(f'Test Results: Loss: {test_loss}, Accuracy: {test_acc}')
+    print(f'\nTest Results: Loss: {test_loss}, Accuracy: {test_acc}')
+
+
+def task_MCQA_BERT(hparams):
+    model = hparams.model
+    test_x, test_y, test_masks = format_data_for_BERT(load_corpus(hparams.test_corpus), model.tokenizer, hparams)
+    _, test_acc = evaluate_BERT(model, test_x, test_y, test_masks, hparams)
+    print(f'MCQA Accuracy: {test_acc}')
+
+
+def test_fine_tuned_MCQA_BERT(hparams):
+    model = hparams.model
+    test_x, test_y, test_masks = format_data_for_BERT(load_corpus(hparams.test_corpus), model.tokenizer, hparams)
+    _, test_acc = evaluate_BERT(model, test_x, test_y, test_masks, hparams)
+    print(f'MCQA Accuracy: {test_acc}')
 
 
 def BERT_QA(hparams):
@@ -154,25 +186,33 @@ def BERT_QA(hparams):
     hparams.train_corpus = 'train_complete.jsonl'
     hparams.valid_corpus = 'dev_complete.jsonl'
     hparams.test_corpus = 'test_complete.jsonl'
-    fine_tune_BERT(hparams)
-    test_fine_tuned_BERT(hparams)
+
+    if not hparams.zero_test:
+        fine_tune_BERT(hparams)
+
+    if hparams.mcqa_test:
+        test_fine_tuned_MCQA_BERT(hparams)
+    else:
+        test_fine_tuned_BERT(hparams)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-test', action='store_true')
+    parser.add_argument('-zero_test', type=bool, default=False)
+    parser.add_argument('-mcqa_test', type=bool, default=True)
     parser.add_argument('-model_type', type=str, default='BERT')
     parser.add_argument('-device', type=str, default='cuda')
-    parser.add_argument('-epochs', type=int, default=1)
+    parser.add_argument('-epochs', type=int, default=5)
     parser.add_argument('-lr', type=float, default=3e-5)
-    parser.add_argument('-batch_size', type=int, default=64)
-    parser.add_argument('-seed', type=int, default=1337)
+    parser.add_argument('-batch_size', type=int, default=128)
+    parser.add_argument('-seed', type=int, default=42)
     parser.add_argument('-max_len', type=int, default=40)
     args = parser.parse_args()
     return args
 
 
 def main():
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
     args = parse_args()
     if args.model_type == 'BERT':
         BERT_QA(args)
