@@ -6,5 +6,5 @@ run hw3_p2.py
 
 script not tested, code taken from https://colab.research.google.com/drive/1e0mX8_1_LO1bNfMh3pZrrMiDOjxf63lY?usp=sharing
 
-model weights saved in custom_gpt2_model
+model weights saved in https://drive.google.com/drive/folders/1nq3A3v7wQK9OuUDmcBuOMWTcd_PUXzkA?usp=sharing
 
