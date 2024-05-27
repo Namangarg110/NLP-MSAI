@@ -399,9 +399,7 @@ def train_model(model, opt):
 
         if opt.savename is not None:
             torch.save(model, f'{opt.savename}/model.pt')
-            with open(f'{opt.savename}/params.txt', 'w') as param_file:
-                param_file.write(str(opt))
-                param_file.close()
+
 
     print(f'\nFinal Results:')
     print(f'\tTrain - Loss: {np.mean(train_history)} PPL: {calc_perplexity(train_history)}')
@@ -424,7 +422,7 @@ def main():
     parser.add_argument('-savename', type=str)
     parser.add_argument('-loadname', type=str)
     parser.add_argument('-tied', type=int, default=1)
-    parser.add_argument('-dir_name', type=str, default='model')
+    parser.add_argument('-dir_name', type=str, default='saved')
     parser.add_argument('-norm', type=float, default=2.0)
     parser.add_argument('-seed', type=int, default=42)
     opt = parser.parse_args()
@@ -437,13 +435,16 @@ def main():
 
     time_name = time.strftime("%y%m%d_%H%M%S")
     opt.time_name = time_name
-    dir_name = "saved/%s" % opt.dir_name
-    ensure_directory_path_exists(dir_name)
-    dir_name = dir_name + "//"
-    opt.dir_name = dir_name
-    opt.log_file = dir_name + "log_file.txt"
 
+    ensure_directory_path_exists(opt.dir_name)
     print(str(opt))
+    if opt.savename is not None:
+        opt.savename = f'./{opt.dir_name}/{opt.savename}'
+        ensure_directory_path_exists(opt.savename)
+        print(f'Model save path: {opt.savename}')
+        with open(f'{opt.savename}/params.txt', 'w') as param_file:
+            param_file.write(str(opt))
+            param_file.close()
 
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 
@@ -453,7 +454,7 @@ def main():
     opt.train = read_corpus(f'{data_dir}/wiki2.train.txt', tokenizer)
     opt.valid = read_corpus(f'{data_dir}/wiki2.valid.txt', tokenizer)
     opt.test = read_corpus(f'{data_dir}/wiki2.test.txt', tokenizer)
-    opt.savename = './saved/model'
+
     opt.vocab_size = 50257
     opt.trg_pad = 0
     opt.mask = torch.broadcast_to(torch.triu(torch.ones((opt.seqlen, opt.seqlen))).T,
@@ -471,7 +472,6 @@ def main():
     if opt.SGDR:
         opt.sched = CosineWithRestarts(opt.optimizer, T_max=opt.train_len)
 
-    ensure_directory_path_exists(opt.savename)
     train_model(model, opt)
 
 
