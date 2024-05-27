@@ -59,7 +59,7 @@ def train(train_dataloader, num_epochs, model, device, optimizer, scheduler,loss
 			outputs = model(input_ids,attention_mask = attention_mask,labels= labels)
 
 			shift_logits = outputs.logits[...,:,:].contiguous()
-			shift_labels = labels[...,:].contigous()
+			shift_labels = labels[...,:].contiguous()
 			batch_indices = torch.arange(shift_logits.size(0)).to(device)
 			last_index = (labels != -100).sum(dim=1).to(device)
 
@@ -78,7 +78,7 @@ def train(train_dataloader, num_epochs, model, device, optimizer, scheduler,loss
 
 
 def compute_rouge(pred, true):
-	scorer = rouge_score.RougeScorer(['rougeL'], use_stemmer = True)
+	scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer = True)
 	scores = scorer.score(pred, true)
 	return scores['rougeL'].fmeasure
 
@@ -120,6 +120,43 @@ def evaluate(test_path, test_dataloader, model, device):
 	print(f"Accuracy: {accuracy * 100:.2f}%")
 
 
+def zero_shot_evaluation(test_path, test_dataloader, model, tokenizer, device):
+    with open(test_path, 'r') as f:
+        test_data = [json.loads(line) for line in f]
+
+    model.eval()
+    predictions = []
+    with torch.no_grad():
+        for batch in test_dataloader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+
+            outputs = model.generate(input_ids=input_ids, attention_mask=attention_mask, max_new_tokens=50)
+            predictions.extend(outputs)
+
+    correct_answers = 0
+    total_answers = 0
+
+    for idx, instance in enumerate(test_data):
+        input_ids = predictions[idx]
+        decoded_output = tokenizer.decode(input_ids, skip_special_tokens=True)
+
+        choices = instance['question']['choices']
+        answer = instance['answerKey']
+
+        choice_texts = [choice['text'] for choice in choices]
+        choice_labels = [choice['label'] for choice in choices]
+
+        rouge_scores = [compute_rouge(decoded_output, choice_text) for choice_text in choice_texts]
+        predicted_label = choice_labels[rouge_scores.index(max(rouge_scores))]
+
+        if predicted_label == answer:
+            correct_answers += 1
+        total_answers += 1
+
+    accuracy = correct_answers / total_answers
+    print(f"Zero-shot Accuracy: {accuracy * 100:.2f}%")
+
 if __name__ == "__main__":
 	train_path = "train_complete.jsonl"
 	test_path = "test_complete.jsonl"
@@ -133,14 +170,14 @@ if __name__ == "__main__":
 	train_dataloader = DataLoader(train_data, batch_size = 4, shuffle = True)
 	test_dataloader = DataLoader(test_data, batch_size = 4, shuffle = False)
 
-	device = torch.device("cuda" if cuda.is_available() else "cpu")
+	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 	model = GPT2LMHeadModel.from_pretrained("gpt2")
 	model.resize_token_embeddings(len(tokenizer))
 	model.to(device)
 
 	num_epochs = 3
-	optmizer = AdamW(model.parameters(), lr = 5e-5)
+	optimizer = AdamW(model.parameters(), lr = 5e-5)
 	total_steps = len(train_dataloader) * num_epochs
 	scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps = 0, num_training_steps = total_steps)
 
@@ -148,3 +185,7 @@ if __name__ == "__main__":
 
 	evaluate(test_path, test_dataloader, model, device)
 
+	zero_shot_model = GPT2LMHeadModel.from_pretrained("gpt2")
+	zero_shot_model.resize_token_embeddings(len(tokenizer))
+	zero_shot_model.to(device)
+	zero_shot_evaluation(test_path, test_dataloader, zero_shot_model, tokenizer, device)
