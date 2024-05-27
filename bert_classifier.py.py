@@ -1,6 +1,6 @@
 import random
 import os
-from transformers import AutoTokenizer, BertModel, GPT2LMHeadModel, GPT2Tokenizer
+from transformers import AutoTokenizer, BertModel
 import torch.optim as optim
 import torch.nn.functional as F
 import argparse
