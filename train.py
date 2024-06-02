@@ -312,17 +312,19 @@ class Transformer(nn.Module):
         output = self.out(d_output)
         return output
 
+    def get_embeddings(self):
+        return self.decoder.embed.embed.weight.detach().to('cpu')
 
 def get_model(opt, trg_vocab):
     assert opt.d_model % opt.heads == 0
     assert opt.dropout < 1
-    model = Transformer(trg_vocab, opt.seqlen, opt.d_model, opt.n_layers, opt.heads, opt.dropout)
-    model.to(opt.device)
 
     if opt.loadname is not None:
         print("loading pretrained weights...")
-        model.load_state_dict(torch.load(opt.loadname))
+        model = torch.load(opt.loadname)
     else:
+        model = Transformer(trg_vocab, opt.seqlen, opt.d_model, opt.n_layers, opt.heads, opt.dropout)
+        model.to(opt.device)
         for p in model.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
@@ -405,7 +407,19 @@ def train_model(model, opt):
     print(f'\tTrain - Loss: {np.mean(train_history)} PPL: {calc_perplexity(train_history)}')
 
 
-def main():
+def load_model_embeddings():
+    opts = parse_args()
+
+    opts.loadname = './GPT2/model1/model.pt'
+    model1 = get_model(opts, opts.vocab_size)
+
+    opts.loadname = './GPT2/model2/model.pt'
+    model2 = get_model(opts, opts.vocab_size)
+
+    return [model1.get_embeddings(), model2.get_embeddings()]
+
+
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-no_cuda', action='store_true')
     parser.add_argument('-SGDR', action='store_true')
@@ -426,6 +440,14 @@ def main():
     parser.add_argument('-norm', type=float, default=2.0)
     parser.add_argument('-seed', type=int, default=42)
     opt = parser.parse_args()
+    opt.vocab_size = 50257
+    opt.trg_pad = 0
+    opt.device = 'cpu'
+    return opt
+
+
+def main():
+    opt = parse_args()
 
     np.random.seed(opt.seed)
     torch.manual_seed(opt.seed)
@@ -455,8 +477,6 @@ def main():
     opt.valid = read_corpus(f'{data_dir}/wiki2.valid.txt', tokenizer)
     opt.test = read_corpus(f'{data_dir}/wiki2.test.txt', tokenizer)
 
-    opt.vocab_size = 50257
-    opt.trg_pad = 0
     opt.mask = torch.broadcast_to(torch.triu(torch.ones((opt.seqlen, opt.seqlen))).T,
                                   (opt.batchsize, opt.seqlen, opt.seqlen)).cuda()
     opt.ppl_eval = Perplexity(device='cuda', ignore_index=opt.trg_pad)
@@ -474,6 +494,9 @@ def main():
 
     train_model(model, opt)
 
+
+def get_embeddings():
+    return load_model_embeddings()
 
 if __name__ == "__main__":
     main()
